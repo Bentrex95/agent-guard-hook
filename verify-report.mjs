@@ -34,7 +34,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
-export const EXIT = { VERIFIED: 0, BLOCKED: 1, PARTIAL: 1, STALE: 2, 'NO-REPORT': 2 };
+export const EXIT = { VERIFIED: 0, BLOCKED: 1, PARTIAL: 1, STALE: 2, 'NO-REPORT': 2, INVALID: 2 };
 
 // ---------------------------------------------------------------------------------------------
 // Pure functions
@@ -71,10 +71,14 @@ export function configProblems(config) {
  * @param {boolean} e.subset      --only was given
  * @param {string} e.stateBefore  state hash before the run
  * @param {string} e.stateAfter   state hash after the run
+ * @param {string[]} e.unmeasured files whose content could not be read while measuring the state
  * @returns {{status:'VERIFIED'|'BLOCKED'|'PARTIAL', exitCode:number, reasons:string[]}}
  */
-export function deriveStatus({ problems = [], steps = [], subset = false, stateBefore, stateAfter }) {
+export function deriveStatus({ problems = [], steps = [], subset = false, stateBefore, stateAfter, unmeasured = [] }) {
   const reasons = [];
+  // A file that could not be read gets a placeholder hash. Two placeholders are equal, so a change
+  // in that file would go unnoticed: the measurement is incomplete and the run cannot be VERIFIED.
+  const incomplete = unmeasured.length > 0;
   const red = steps.filter((s) => s.result === 'red');
   const notRun = steps.filter((s) => s.result === 'not-run');
   const unknown = steps.filter((s) => !['green', 'red', 'not-run'].includes(s.result));
@@ -88,11 +92,12 @@ export function deriveStatus({ problems = [], steps = [], subset = false, stateB
 
   if (subset) reasons.push('subset (--only)');
   if (stateChanged) reasons.push('state changed during the run (or could not be measured)');
+  if (incomplete) reasons.push(`state measured incompletely, unreadable: ${[...new Set(unmeasured)].slice(0, 5).join(', ')}`);
   if (!blocked && !subset && notRun.length > 0) reasons.push(`not run: ${notRun.map((s) => s.name).join(', ')}`);
 
   let status;
   if (blocked) status = 'BLOCKED';
-  else if (subset || stateChanged || notRun.length > 0) status = 'PARTIAL';
+  else if (subset || stateChanged || incomplete || notRun.length > 0) status = 'PARTIAL';
   else status = 'VERIFIED';
   return { status, exitCode: EXIT[status], reasons };
 }
@@ -117,11 +122,25 @@ export function checkStored(report, currentHash) {
   if (!report || typeof report !== 'object' || !report.state || typeof report.status !== 'string') {
     return { status: 'NO-REPORT', exitCode: EXIT['NO-REPORT'], reason: 'no readable report (.verify-report.json)' };
   }
+  // The stored status is not taken on trust. It is derived again from the evidence stored next to
+  // it; a report whose status does not follow from its own steps and hashes is rejected. Missing
+  // fields count against the report, not for it.
+  const derived = deriveStatus({
+    problems: Array.isArray(report.problems) ? report.problems : ['the report has no list of problems'],
+    steps: Array.isArray(report.steps) ? report.steps : [],
+    subset: report.subset !== false,
+    stateBefore: report.state.before?.hash,
+    stateAfter: report.state.after?.hash,
+    unmeasured: [...(report.state.before?.unreadable ?? []), ...(report.state.after?.unreadable ?? [])],
+  });
+  if (derived.status !== report.status) {
+    return { status: 'INVALID', exitCode: EXIT.INVALID, reason: `stored status ${report.status} does not follow from the stored evidence, which gives ${derived.status}` };
+  }
   const stored = report.state.after?.hash;
   if (!stored || !currentHash || stored !== currentHash) {
     return { status: 'STALE', exitCode: EXIT.STALE, reason: `state ${short(currentHash)} differs from the report's ${short(stored)}` };
   }
-  return { status: report.status, exitCode: report.status === 'VERIFIED' ? 0 : 1, reason: 'state unchanged since the report' };
+  return { status: derived.status, exitCode: derived.exitCode, reason: 'state unchanged since the report' };
 }
 
 const short = (h) => (typeof h === 'string' ? h.slice(0, 12) : '(missing)');
@@ -201,26 +220,31 @@ export function measureState(root, scope) {
     const end = i + 1 < starts.length ? starts[i + 1].index : diffText.length;
     files[`diff:${m[1]}`] = sha(Buffer.from(diffText.slice(m.index, end), 'latin1'));
   });
+  const unreadable = [];
   for (const p of untracked) {
     let content;
-    try { content = readFileSync(join(root, p)); } catch { content = Buffer.from('(unreadable)'); }
+    try { content = readFileSync(join(root, p)); } catch { content = Buffer.from('(unreadable)'); unreadable.push(p); }
     files[`new:${p}`] = sha(content);
   }
   const h = createHash('sha256');
   h.update(`head\0${head}\0`);
   h.update('diff\0'); h.update(diff); h.update('\0');
   for (const k of Object.keys(files).filter((x) => !x.startsWith('diff:')).sort()) h.update(`${k}\0${files[k]}\0`);
-  return { head, branch, hash: h.digest('hex'), clean: diff.length === 0, untracked: untracked.length, files };
+  return { head, branch, hash: h.digest('hex'), clean: diff.length === 0, untracked: untracked.length, files, unreadable };
 }
 
 // Time limit per step (default 15 min, override with VERIFY_STEP_TIMEOUT_MS). A hanging step is
-// ended with its WHOLE process tree and counts as red: on Windows a plain kill only ends the
-// shell, the children keep running and keep the pipes open.
+// ended with its WHOLE process tree and counts as red. On Windows a plain kill only ends the
+// shell, the children keep running and keep the pipes open, so taskkill /T is used. Elsewhere
+// the step runs in its own process group and the group is killed. Returns whether the kill
+// reported success; the report says so instead of assuming it.
+const KILL_GRACE_MS = 5000;
 function killTree(p) {
   try {
-    if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore' });
-    else p.kill('SIGKILL');
-  } catch { /* best effort */ }
+    if (process.platform === 'win32') return spawnSync('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore' }).status === 0;
+    process.kill(-p.pid, 'SIGKILL');
+    return true;
+  } catch { return false; }
 }
 
 function runStep(step, root, limitMs, quiet) {
@@ -229,25 +253,38 @@ function runStep(step, root, limitMs, quiet) {
     const lines = [];
     let rest = '';
     let timedOut = false;
+    let killed = false;
+    let done = false;
+    let grace = null;
     const note = (d) => {
       rest += d.toString();
       const parts = rest.split(/\r?\n/);
       rest = parts.pop();
       for (const t of parts) { lines.push(t); if (lines.length > 25) lines.shift(); }
     };
-    const p = spawn(step.command, { cwd: root, shell: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const alarm = setTimeout(() => { timedOut = true; killTree(p); }, limitMs);
+    const p = spawn(step.command, { cwd: root, shell: true, env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    const finish = (code, signal, abandoned) => {
+      if (done) return;
+      done = true;
+      clearTimeout(alarm);
+      clearTimeout(grace);
+      if (rest) lines.push(rest);
+      const durationMs = performance.now() - t0;
+      if (timedOut) lines.push(`TIME LIMIT: stopped after ${Math.round(limitMs / 1000)} s, ${killed ? 'process tree ended' : 'the kill did not report success'}`);
+      if (abandoned) lines.push(`the step did not close its output within ${KILL_GRACE_MS / 1000} s after the kill; processes may still be running`);
+      const green = code === 0 && !timedOut;
+      res({ name: step.name, command: step.command, exitCode: timedOut ? 'time limit' : (code ?? `signal ${signal}`), result: green ? 'green' : 'red', durationMs, outputTail: green ? [] : lines.slice(-15) });
+    };
+    const alarm = setTimeout(() => {
+      timedOut = true;
+      killed = killTree(p);
+      // If something still holds the pipes open, do not wait for it forever.
+      grace = setTimeout(() => { p.stdout.destroy(); p.stderr.destroy(); p.unref(); finish(null, null, true); }, KILL_GRACE_MS);
+    }, limitMs);
     p.stdout.on('data', (d) => { if (!quiet) process.stdout.write(d); note(d); });
     p.stderr.on('data', (d) => { if (!quiet) process.stderr.write(d); note(d); });
     p.on('error', (err) => { lines.push(`spawn error: ${err.message}`); });
-    p.on('close', (code, signal) => {
-      clearTimeout(alarm);
-      if (rest) lines.push(rest);
-      const durationMs = performance.now() - t0;
-      if (timedOut) lines.push(`TIME LIMIT: stopped after ${Math.round(limitMs / 1000)} s, process tree ended`);
-      const green = code === 0 && !timedOut;
-      res({ name: step.name, command: step.command, exitCode: timedOut ? 'time limit' : (code ?? `signal ${signal}`), result: green ? 'green' : 'red', durationMs, outputTail: green ? [] : lines.slice(-15) });
-    });
+    p.on('close', (code, signal) => finish(code, signal, false));
   });
 }
 
@@ -258,7 +295,8 @@ function readConfig(root) {
 async function run(root, only, quiet) {
   const beginMs = Date.now();
   const raw = readConfig(root);
-  const problems = raw.unreadable ? [`verify.config.json unreadable: ${raw.unreadable}`] : configProblems(raw);
+  // `raw` can be anything JSON allows, including null.
+  const problems = raw?.unreadable ? [`verify.config.json unreadable: ${raw.unreadable}`] : configProblems(raw);
   const config = problems.length === 0 ? raw : { steps: Array.isArray(raw?.steps) ? raw.steps.filter((s) => s && typeof s.name === 'string' && typeof s.command === 'string') : [] };
   const scope = Array.isArray(config.scope) ? config.scope : [];
   const limitMs = Number(process.env.VERIFY_STEP_TIMEOUT_MS ?? 15 * 60 * 1000);
@@ -277,7 +315,7 @@ async function run(root, only, quiet) {
     if (r.result === 'red') stopped = `stopped after red in ${s.name}`;
   }
   const after = measureState(root, scope);
-  const { status, exitCode, reasons } = deriveStatus({ problems, steps: results, subset, stateBefore: before.hash, stateAfter: after.hash });
+  const { status, exitCode, reasons } = deriveStatus({ problems, steps: results, subset, stateBefore: before.hash, stateAfter: after.hash, unmeasured: [...before.unreadable, ...after.unreadable] });
   const endMs = Date.now();
   const report = {
     format: 1,
@@ -301,7 +339,11 @@ function check(root) {
   const raw = readConfig(root);
   const current = measureState(root, Array.isArray(raw?.scope) ? raw.scope : []);
   const r = checkStored(report, current.hash);
-  if (report?.block) console.log(report.block);
+  // The block is formatted again from the stored data instead of printing the stored text, and
+  // only when the report is consistent: a block must never be quotable from an invalid report.
+  if (r.status !== 'INVALID' && r.status !== 'NO-REPORT') {
+    try { console.log(formatReport(report)); } catch { /* an unprintable report is caught by the status line below */ }
+  }
   if (r.status === 'STALE' && report?.state?.after) for (const u of stateDifference(report.state.after, current)) console.log(`  since the report: ${u}`);
   console.log(`\n[verify-report --check] ${r.status}: ${r.reason} (report from ${report?.end ?? '-'}, HEAD now ${current.head.slice(0, 12)})`);
   return r.exitCode;

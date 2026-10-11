@@ -54,7 +54,12 @@ test('units: singular and plural, and a number that is not a time', () => {
   assert.equal(budgetFrom('Budget: 45 seconds', null), 45);
   assert.equal(budgetFrom('Budget: 500 dollars', null), null);
   assert.equal(budgetFrom('budget: 2 $', null), null);
-  assert.equal(budgetFrom('Budget: 30 please be quick', null), 1800, 'an ordinary next word leaves the default unit');
+  assert.equal(budgetFrom('Budget: 500 GBP', null), null);
+  assert.equal(budgetFrom('Budget: 500 credits', null), null);
+  assert.equal(budgetFrom('Budget: 1 day', null), null, 'a unit the hook does not know is not turned into minutes');
+  assert.equal(budgetFrom('Budget: 30 please be quick', null), null, 'a word after the number must be a time unit');
+  assert.equal(budgetFrom('Budget: 30. Please be quick.', null), 1800, 'a bare number means minutes');
+  assert.equal(budgetFrom('Budget: 30\nplease be quick', null), 1800);
 });
 
 test('open items block the end of the turn and are named in the reason', () => {

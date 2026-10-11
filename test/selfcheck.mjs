@@ -27,16 +27,20 @@ const breaks = [
   ['the first hit wins again, so an audit rule hides a block rule', 'lib/rules.mjs', "return hits.find((v) => v.mode === 'block') ?? hits[0] ?? null;", 'return hits[0] ?? null;'],
 ];
 
-// Exit code 1 means "the test ran and failed". Anything else (a crash, a timeout, a process that
-// never started) is a broken self-check and must not be counted as a detected break.
-const ranAndFailed = (r) => !r.error && r.signal === null && r.status === 1;
-const ranAndPassed = (r) => !r.error && r.signal === null && r.status === 0;
-
 const run = (hook) => spawnSync(process.execPath, [ACCEPTANCE], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, GUARD_HOOK: hook } });
 
-let bad = 0;
+// A detected break means: the acceptance test reached its last line, reported on ALL its cases
+// and at least one failed. The number of cases is taken from the untouched run. A script that
+// crashes, times out or never starts must not look like a detected break.
+const total = (r) => Number((/^(?:PASSED: |FAILED: \d+ of )(\d+) cases$/m.exec(r.stdout ?? '') ?? [])[1] ?? -1);
 const clean = run(join(ROOT, 'guard.mjs'));
-if (!ranAndPassed(clean)) { console.log('FAIL  the untouched hook does not pass its own acceptance test'); bad += 1; } else console.log('ok    untouched hook passes');
+const expectedCases = total(clean);
+const ranAndPassed = (r) => !r.error && r.signal === null && r.status === 0 && total(r) > 0;
+const ranAndFailed = (r) => !r.error && r.signal === null && r.status === 1
+  && /^FAILED: [1-9]\d* of \d+ cases$/m.test(r.stdout ?? '') && total(r) === expectedCases;
+
+let bad = 0;
+if (!ranAndPassed(clean)) { console.log('FAIL  the untouched hook does not pass its own acceptance test'); bad += 1; } else console.log(`ok    untouched hook passes (${expectedCases} cases)`);
 
 for (const [name, file, find, replace] of breaks) {
   const dir = mkdtempSync(join(tmpdir(), 'guard-selfcheck-'));
@@ -52,7 +56,7 @@ for (const [name, file, find, replace] of breaks) {
     writeFileSync(path, src.replace(find, replace), 'utf8');
     const r = run(join(dir, 'guard.mjs'));
     if (ranAndPassed(r)) { console.log(`FAIL  ${name}: acceptance test stayed green with the rule broken`); bad += 1; }
-    else if (!ranAndFailed(r)) { console.log(`FAIL  ${name}: the acceptance test did not run properly (status ${r.status}, signal ${r.signal})`); bad += 1; }
+    else if (!ranAndFailed(r)) { console.log(`FAIL  ${name}: the acceptance test did not run completely (status ${r.status}, signal ${r.signal}, ${total(r)} of ${expectedCases} cases)`); bad += 1; }
     else console.log(`ok    ${name}: acceptance test turns red`);
   }
   rmSync(dir, { recursive: true, force: true });

@@ -42,12 +42,35 @@ test('the configuration is checked', () => {
   assert.ok(configProblems({ steps: [{ name: 't', command: 'a' }], notChecked: [{ what: 'x', reason: '' , evidence: 'e' }] }).some((p) => /reason/.test(p)));
 });
 
+test('a file that could not be read keeps the run from being VERIFIED', () => {
+  const r = deriveStatus({ steps: [green('a')], stateBefore: 'x', stateAfter: 'x', unmeasured: ['locked.bin'] });
+  assert.equal(r.status, 'PARTIAL');
+  assert.ok(r.reasons.some((x) => /locked\.bin/.test(x)));
+});
+
+// A stored report as the program writes it: all green, state unchanged.
+const stored = (over = {}) => ({
+  status: 'VERIFIED', subset: false, problems: [], steps: [green('a'), green('b')],
+  state: { before: { hash: 'abc', unreadable: [] }, after: { hash: 'abc', unreadable: [] } }, ...over,
+});
+
 test('a stored report is stale as soon as the state differs', () => {
-  const report = { status: 'VERIFIED', state: { after: { hash: 'abc' } } };
-  assert.deepEqual([checkStored(report, 'abc').status, checkStored(report, 'abc').exitCode], ['VERIFIED', 0]);
-  assert.deepEqual([checkStored(report, 'def').status, checkStored(report, 'def').exitCode], ['STALE', 2]);
-  assert.equal(checkStored({ ...report, status: 'PARTIAL' }, 'abc').exitCode, 1);
+  assert.deepEqual([checkStored(stored(), 'abc').status, checkStored(stored(), 'abc').exitCode], ['VERIFIED', 0]);
+  assert.deepEqual([checkStored(stored(), 'def').status, checkStored(stored(), 'def').exitCode], ['STALE', 2]);
+  assert.equal(checkStored(stored({ status: 'PARTIAL', subset: true }), 'abc').exitCode, 1);
   assert.equal(checkStored(null, 'abc').status, 'NO-REPORT');
+});
+
+test('a stored status that does not follow from the stored evidence is rejected', () => {
+  const invalid = (r) => assert.deepEqual([checkStored(r, 'abc').status, checkStored(r, 'abc').exitCode], ['INVALID', 2]);
+  invalid(stored({ steps: [green('a'), red('b')] }));                 // says VERIFIED, has a red step
+  invalid(stored({ subset: true }));                                   // says VERIFIED, was a subset
+  invalid(stored({ problems: ['bad config'] }));                       // says VERIFIED, had config problems
+  invalid(stored({ state: { before: { hash: 'old' }, after: { hash: 'abc' } } })); // state changed during the run
+  invalid(stored({ steps: undefined }));                               // evidence missing
+  invalid(stored({ problems: undefined }));
+  invalid({ status: 'VERIFIED', state: { after: { hash: 'abc' } } });  // nothing but a claim
+  invalid(stored({ status: 'PARTIAL' }));                              // a worse status than the evidence gives is wrong too
 });
 
 test('a state difference names the files', () => {
@@ -160,6 +183,31 @@ test('program: a hanging step is ended at the time limit and counts as red', () 
     assert.match(r.out, /RED: hang \(exit time limit/);
     assert.match(r.out, /TIME LIMIT: stopped after 2 s/);
     assert.ok(Date.now() - t0 < 30_000, 'the run must end soon after the limit, not hang on open pipes');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('program: --check does not accept a report whose status was edited', () => {
+  const dir = repo({ steps: [step('one', 'ok.mjs'), step('two', 'fail.mjs')] });
+  try {
+    assert.equal(run(dir).code, 1);
+    const file = join(dir, '.verify-report.json');
+    const report = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(report.status, 'BLOCKED');
+    writeFileSync(file, JSON.stringify({ ...report, status: 'VERIFIED', block: report.block.replace('Status: BLOCKED', 'Status: VERIFIED') }));
+    const r = run(dir, ['--check']);
+    assert.equal(r.code, 2);
+    assert.match(r.out, /INVALID: stored status VERIFIED does not follow from the stored evidence, which gives BLOCKED/);
+    assert.doesNotMatch(r.out, /Status: VERIFIED/, 'the forged block must not be printed');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('program: a configuration that is valid JSON but not an object blocks instead of crashing', () => {
+  const dir = repo(null);
+  try {
+    const r = run(dir);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /Status: BLOCKED/);
+    assert.match(r.out, /CONFIG: verify\.config\.json is not an object/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

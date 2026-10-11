@@ -25,7 +25,7 @@ Agents like to stop with a status report while work is still open. This hook rea
 
 ### `budget.mjs`: show the agent the clock
 
-An agent has no sense of time. This hook writes a line such as `Elapsed: 500s / 600s (83 %). 80 % used: core and verification only.` into the agent's context, at most once a minute and immediately when a threshold is crossed. A budget exists only when one was stated ("Budget: 30 min"); the hook never invents one.
+An agent has no sense of time. This hook writes a line such as `Elapsed: 500s / 600s (83 %). 80 % used: core and verification only.` into the agent's context, at most once a minute and immediately when a threshold is crossed. A budget exists only when one was stated ("Budget: 30 min", "Budget: 2 hours", or a bare number for minutes). A number followed by a word that is not a time unit, such as "Budget: 500 dollars", is not a time budget.
 
 ### `verify-report.mjs`: "done" is a quote, not a sentence
 
@@ -34,11 +34,16 @@ An agent that writes "all tests pass" is summarizing, and summaries drift toward
 | Status | Meaning |
 |---|---|
 | `VERIFIED` | Every step green, and nothing changed while the steps ran. |
-| `PARTIAL` | Green, but only a subset ran, or the working tree changed during the run. |
+| `PARTIAL` | Green, but only a subset ran, the working tree changed during the run, or a file could not be read while measuring the state. |
 | `BLOCKED` | A step is red or the configuration is invalid. Steps after a red one are not started. |
 | `STALE` | The stored report no longer matches the code (`--check`). |
+| `INVALID` | The stored status does not follow from the steps and hashes stored with it (`--check`). |
 
-The block also prints a maintained list of what the run does not prove. The agent quotes the block verbatim; a claim of "done" without it does not count. A step that hangs is ended at a time limit with its whole process tree and counts as red.
+The block also prints a maintained list of what the run does not prove. The agent quotes the block verbatim; a claim of "done" without it does not count.
+
+`--check` does not trust the stored status. It derives the status again from the stored evidence and prints the block from that, so a report file that was edited by hand is rejected.
+
+A step that hangs is ended at a time limit and counts as red. On Windows the whole process tree is ended with `taskkill`; elsewhere the step runs in its own process group and the group is killed. The report says whether the kill reported success, and the run does not wait forever if something keeps the output open.
 
 ```
 === VERIFY REPORT ===
@@ -73,13 +78,13 @@ Needs Node 20 or newer and git, no dependencies.
 npm test
 ```
 
-runs the acceptance test of the guard (19 legitimate calls that must go through, 15 violations that must be caught, the BOM check, the fail-open cases), 14 tests for the completion loop and the time budget, and 14 tests for the verify report, six of which run the program in a temporary git repository.
+runs the acceptance test of the guard (19 legitimate calls that must go through, 15 violations that must be caught, the BOM check, the fail-open cases), 14 tests for the completion loop and the time budget, and 18 tests for the verify report, eight of which run the program in a temporary git repository.
 
 ```bash
 npm run selfcheck
 ```
 
-checks the tests themselves. It breaks one thing at a time in a copy of the code, 32 breaks in total, and expects the tests to fail every time. A crash or a timeout does not count as a detected break. A test that has never been seen failing proves nothing.
+checks the tests themselves. It breaks one thing at a time in a copy of the code, 35 breaks in total, and expects the tests to fail every time. A break counts as detected only when the test file ran all its tests and at least one failed; a crash, a timeout or a file that could not start does not count. A test that has never been seen failing proves nothing.
 
 ```bash
 node verify-report.mjs
@@ -121,8 +126,10 @@ Set `GUARD_AUDIT_LOG` to a file path to record what the audit rules see. Set `GU
 - The second-model rule is a placeholder. A marker word in a command is not a permission boundary; real isolation needs a sandbox or a separate user.
 - The completion loop rejects only once per turn and does not fire when the user interrupts. An agent that never writes a checklist is not affected.
 - The verify report proves that the configured steps ran green on this state. It proves nothing about what the steps themselves fail to test; that is what the "not checked" list and the self-check are for.
+- The time limit was only tested on Windows. The process-group kill for Linux and macOS is written but not run.
+- `--check` catches a report whose status contradicts its own evidence. It cannot catch a report in which the evidence itself was rewritten consistently.
 - The numbers in the messages (600 s cap, 130 s versus 1 s) were measured in my own environment.
 
 ## How it was built
 
-I designed the rules and the tests and reviewed every change. Coding agents wrote most of the code, which is how I work. Before publishing, a second model reviewed the code with fresh context and found an audit rule hiding a block rule; the fix and its test are in.
+I designed the rules and the tests and reviewed every change. Coding agents wrote most of the code, which is how I work. Before publishing, a second model reviewed the code twice with fresh context. It found, among other things, an audit rule hiding a block rule, a stored report that was believed without its evidence, and self-checks that counted a test file that could not start as a detected break. The fixes and their tests are in.
