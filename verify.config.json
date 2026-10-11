@@ -1,0 +1,15 @@
+{
+  "steps": [
+    { "name": "guard", "command": "node test/acceptance.mjs" },
+    { "name": "loop-and-budget", "command": "node --test test/loop-and-budget.test.mjs" },
+    { "name": "verify-report", "command": "node --test test/verify-report.test.mjs" },
+    { "name": "selfcheck-guard", "command": "node test/selfcheck.mjs" },
+    { "name": "selfcheck-rest", "command": "node test/selfcheck-loop.mjs" }
+  ],
+  "scope": ["."],
+  "notChecked": [
+    { "what": "the hooks inside a real Claude Code session", "reason": "the tests feed the hooks the JSON of an event; no step starts Claude Code itself", "evidence": "test/acceptance.mjs, test/loop-and-budget.test.mjs" },
+    { "what": "shell syntax beyond the listed cases", "reason": "the wait-loop and second-model rules are text patterns", "evidence": "lib/rules.mjs" },
+    { "what": "process tree kill on Linux and macOS", "reason": "the time limit test was only run on Windows", "evidence": "test/verify-report.test.mjs" }
+  ]
+}

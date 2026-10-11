@@ -1,13 +1,13 @@
 {
   "name": "agent-guard-hook",
-  "version": "1.0.0",
-  "description": "A Claude Code hook that enforces working rules for coding agents instead of asking for them in a prompt, with a test that is itself tested.",
+  "version": "1.2.0",
+  "description": "Claude Code hooks and a verification report that enforce working rules for coding agents instead of asking for them in a prompt, with tests that are themselves tested.",
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node test/acceptance.mjs",
-    "selfcheck": "node test/selfcheck.mjs",
-    "verify": "node test/acceptance.mjs && node test/selfcheck.mjs"
+    "test": "node test/acceptance.mjs && node --test test/loop-and-budget.test.mjs test/verify-report.test.mjs",
+    "selfcheck": "node test/selfcheck.mjs && node test/selfcheck-loop.mjs",
+    "verify": "node verify-report.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -81,6 +81,8 @@ const sabotage = [
   ['codex unsandboxed', 'Bash', { command: 'codex --sandbox danger-full-access exec "review this repo"' }, 'secondmodel'],
   ['codex unsandboxed INSIDE a worktree (no exception)', 'Bash', { command: 'cd /c/Temp/wt-1 && codex --sandbox danger-full-access exec "fix"' }, 'secondmodel'],
   ['codex with bypass switch', 'Bash', { command: 'codex --dangerously-bypass-approvals-and-sandbox exec "check"' }, 'secondmodel'],
+  ['a block rule hidden behind an audit rule in the same command', 'Bash', { command: 'sleep 60; codex --sandbox danger-full-access exec "review"' }, 'secondmodel'],
+  ['a block rule hidden behind a wait loop', 'Bash', { command: 'until test -f go; do sleep 5; done; npm test', timeout: 900000 }, 'timeout'],
 ];
 const MODE = { timeout: 'block', secondmodel: 'block', waitloop: 'audit', bom: 'block' };
 
@@ -128,5 +130,7 @@ if (off.status !== 0) fail('kill switch GUARD_OFF=1 did not let the call through
 
 rmSync(tmp, { recursive: true, force: true });
 const total = normal.length + sabotage.length + 4;
+// A crash of this script must never look like a pass or like a detected break.
+process.on('uncaughtException', (e) => { console.log(`CRASH ${e?.message}`); process.exit(3); });
 console.log(failures === 0 ? `\nPASSED: ${total} cases` : `\nFAILED: ${failures} of ${total} cases`);
 process.exit(failures === 0 ? 0 : 1);

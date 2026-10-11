@@ -24,13 +24,19 @@ const breaks = [
   ['block mode downgraded to audit', 'lib/rules.mjs', "timeout: 'block',", "timeout: 'audit',"],
   ['hook no longer fails open', 'guard.mjs', "} catch {\n  // Fail open, deliberately silent", "} catch {\n  process.exit(2);\n  // Fail open, deliberately silent"],
   ['wait loop falsely fires on any sleep', 'lib/rules.mjs', 'if (long && Number(long[1]) >= SLEEP_MAX_S) {', 'if (long) {'],
+  ['the first hit wins again, so an audit rule hides a block rule', 'lib/rules.mjs', "return hits.find((v) => v.mode === 'block') ?? hits[0] ?? null;", 'return hits[0] ?? null;'],
 ];
+
+// Exit code 1 means "the test ran and failed". Anything else (a crash, a timeout, a process that
+// never started) is a broken self-check and must not be counted as a detected break.
+const ranAndFailed = (r) => !r.error && r.signal === null && r.status === 1;
+const ranAndPassed = (r) => !r.error && r.signal === null && r.status === 0;
 
 const run = (hook) => spawnSync(process.execPath, [ACCEPTANCE], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, GUARD_HOOK: hook } });
 
 let bad = 0;
 const clean = run(join(ROOT, 'guard.mjs'));
-if (clean.status !== 0) { console.log('FAIL  the untouched hook does not pass its own acceptance test'); bad += 1; } else console.log('ok    untouched hook passes');
+if (!ranAndPassed(clean)) { console.log('FAIL  the untouched hook does not pass its own acceptance test'); bad += 1; } else console.log('ok    untouched hook passes');
 
 for (const [name, file, find, replace] of breaks) {
   const dir = mkdtempSync(join(tmpdir(), 'guard-selfcheck-'));
@@ -45,7 +51,8 @@ for (const [name, file, find, replace] of breaks) {
   } else {
     writeFileSync(path, src.replace(find, replace), 'utf8');
     const r = run(join(dir, 'guard.mjs'));
-    if (r.status === 0) { console.log(`FAIL  ${name}: acceptance test stayed green with the rule broken`); bad += 1; }
+    if (ranAndPassed(r)) { console.log(`FAIL  ${name}: acceptance test stayed green with the rule broken`); bad += 1; }
+    else if (!ranAndFailed(r)) { console.log(`FAIL  ${name}: the acceptance test did not run properly (status ${r.status}, signal ${r.signal})`); bad += 1; }
     else console.log(`ok    ${name}: acceptance test turns red`);
   }
   rmSync(dir, { recursive: true, force: true });
