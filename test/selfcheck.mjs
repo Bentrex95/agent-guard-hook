@@ -25,6 +25,11 @@ const breaks = [
   ['hook no longer fails open', 'guard.mjs', "} catch {\n  // Fail open, deliberately silent", "} catch {\n  process.exit(2);\n  // Fail open, deliberately silent"],
   ['wait loop falsely fires on any sleep', 'lib/rules.mjs', 'if (long && Number(long[1]) >= SLEEP_MAX_S) {', 'if (long) {'],
   ['the first hit wins again, so an audit rule hides a block rule', 'lib/rules.mjs', "return hits.find((v) => v.mode === 'block') ?? hits[0] ?? null;", 'return hits[0] ?? null;'],
+  ['wait-loop rule back to audit, the agent is never told', 'lib/rules.mjs', "waitloop: 'hint',", "waitloop: 'audit',"],
+  ['hints collected but never printed', 'guard.mjs', 'if (hints.length) {', 'if (false) {'],
+  ['a hint also approves the call (skips the permission prompt)', 'guard.mjs', "hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext", "hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', additionalContext"],
+  ['a hint ends the hook early again', 'guard.mjs', "if (v.mode === 'hint') hints.push(", "if (v.mode === 'hint') process.exit(0); if (0) hints.push("],
+  ['a hint is printed next to a block', 'guard.mjs', "  if (v.mode === 'block') {\n    process.stderr.write", "  if (v.mode === 'block') {\n    process.stdout.write('{\"hookSpecificOutput\":{}}');\n    process.stderr.write"],
 ];
 
 const run = (hook) => spawnSync(process.execPath, [ACCEPTANCE], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, GUARD_HOOK: hook } });

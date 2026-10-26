@@ -4,12 +4,16 @@
     { "name": "loop-and-budget", "command": "node --test test/loop-and-budget.test.mjs" },
     { "name": "verify-report", "command": "node --test test/verify-report.test.mjs" },
     { "name": "selfcheck-guard", "command": "node test/selfcheck.mjs" },
-    { "name": "selfcheck-rest", "command": "node test/selfcheck-loop.mjs" }
+    { "name": "selfcheck-rest", "command": "node test/selfcheck-loop.mjs" },
+    { "name": "profiler", "command": "python measure/test_profile_runs.py" },
+    { "name": "selfcheck-profiler", "command": "python measure/selfcheck_profile.py" }
   ],
   "scope": ["."],
   "notChecked": [
     { "what": "the hooks inside a real Claude Code session", "reason": "the tests feed the hooks the JSON of an event; no step starts Claude Code itself", "evidence": "test/acceptance.mjs, test/loop-and-budget.test.mjs" },
     { "what": "shell syntax beyond the listed cases", "reason": "the wait-loop and second-model rules are text patterns", "evidence": "lib/rules.mjs" },
-    { "what": "process tree kill on Linux and macOS", "reason": "the time limit test was only run on Windows", "evidence": "test/verify-report.test.mjs" }
+    { "what": "process tree kill on Linux and macOS", "reason": "the time limit test was only run on Windows", "evidence": "test/verify-report.test.mjs" },
+    { "what": "the hint reaching the model in a real session", "reason": "the tests check the JSON the hook prints; that Claude Code shows additionalContext to the model was seen live only with the equivalent hook of my own setup", "evidence": "test/acceptance.mjs" },
+    { "what": "the profiler on real transcripts", "reason": "the golden test uses a synthetic transcript; the format of real transcripts can change with Claude Code versions", "evidence": "measure/test_profile_runs.py" }
   ]
 }

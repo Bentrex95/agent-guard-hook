@@ -29,8 +29,17 @@ function call(payload) {
     input: JSON.stringify(payload), encoding: 'utf8', timeout: 20_000,
     env: { ...process.env, GUARD_AUDIT_LOG: LOG, GUARD_OFF: '' },
   });
-  return { code: r.status, err: (r.stderr ?? '').trim() };
+  return { code: r.status, err: (r.stderr ?? '').trim(), out: (r.stdout ?? '').trim() };
 }
+// A hint is additionalContext for PreToolUse and nothing else: no permissionDecision, because
+// "allow" would skip the user's permission prompts and "deny"/"ask" would turn a hint into a block.
+const hintFor = (r, rule) => {
+  try {
+    const h = JSON.parse(r.out).hookSpecificOutput;
+    return h?.hookEventName === 'PreToolUse' && !('permissionDecision' in h)
+      && typeof h.additionalContext === 'string' && h.additionalContext.includes(`GUARD-HINT (${rule})`);
+  } catch { return false; }
+};
 const before = (tool, input) => call({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input });
 const logged = () => (existsSync(LOG) ? readFileSync(LOG, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
 
@@ -58,7 +67,8 @@ const normal = [
 ];
 
 // ---------------------------------------------------------------- B) SABOTAGE
-// expected: 'block' = exit code 2, 'audit' = goes through but must appear in the audit log
+// expected: 'block' = exit code 2 and nothing on stdout, 'hint' = goes through, appears in the
+// audit log and gives the agent the reason as additionalContext
 const sabotage = [
   ['timeout above 600000', 'Bash', { command: 'npm test', timeout: 600001 }, 'timeout'],
   ['absurdly high timeout', 'Bash', { command: 'npm test', timeout: 3600000 }, 'timeout'],
@@ -84,28 +94,31 @@ const sabotage = [
   ['a block rule hidden behind an audit rule in the same command', 'Bash', { command: 'sleep 60; codex --sandbox danger-full-access exec "review"' }, 'secondmodel'],
   ['a block rule hidden behind a wait loop', 'Bash', { command: 'until test -f go; do sleep 5; done; npm test', timeout: 900000 }, 'timeout'],
 ];
-const MODE = { timeout: 'block', secondmodel: 'block', waitloop: 'audit', bom: 'block' };
+const MODE = { timeout: 'block', secondmodel: 'block', waitloop: 'hint', bom: 'block' };
 
 let failures = 0;
 const fail = (msg) => { failures += 1; console.log(`  FAIL  ${msg}`); };
 
-console.log('A) NORMAL: must go through and leave no audit entry');
+console.log('A) NORMAL: must go through, leave no audit entry and print nothing');
 for (const [name, tool, input] of normal) {
   const n = logged().length;
   const r = before(tool, input);
   if (r.code !== 0) fail(`${name}: rejected (${r.err})`);
   else if (logged().length !== n) fail(`${name}: went through but was logged as a violation`);
+  else if (r.out !== '') fail(`${name}: went through but printed ${r.out.slice(0, 80)}`);
   else console.log(`  ok    ${name}`);
 }
 
-console.log('B) SABOTAGE: must be blocked, or logged for audit rules');
+console.log('B) SABOTAGE: must be blocked, or logged and hinted for hint rules');
 for (const [name, tool, input, rule] of sabotage) {
   const n = logged().length;
   const r = before(tool, input);
   const entry = logged().slice(n).find((e) => e.rule === rule);
   if (MODE[rule] === 'block' && r.code !== 2) fail(`${name}: not blocked (exit ${r.code})`);
   else if (MODE[rule] === 'block' && !r.err.includes(`GUARD (${rule})`)) fail(`${name}: blocked without the reason for rule ${rule}`);
-  else if (MODE[rule] === 'audit' && r.code !== 0) fail(`${name}: audit rule must not block (exit ${r.code})`);
+  else if (MODE[rule] === 'block' && r.out !== '') fail(`${name}: blocked, but also printed ${r.out.slice(0, 80)}`);
+  else if (MODE[rule] === 'hint' && r.code !== 0) fail(`${name}: hint rule must not block (exit ${r.code})`);
+  else if (MODE[rule] === 'hint' && !hintFor(r, rule)) fail(`${name}: no hint for the agent (stdout: ${r.out.slice(0, 80) || 'empty'})`);
   else if (!entry) fail(`${name}: no audit entry for rule ${rule}`);
   else console.log(`  ok    ${name} -> ${MODE[rule]}`);
 }

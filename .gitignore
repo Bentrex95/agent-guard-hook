@@ -2,3 +2,5 @@ node_modules/
 *.log
 audit.jsonl
 .verify-report.json
+__pycache__/
+runs*.jsonl

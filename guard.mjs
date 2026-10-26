@@ -8,9 +8,11 @@
 // work it protects. Kill switch: environment variable GUARD_OFF=1.
 //
 // Blocking happens through stderr + exit code 2, the documented blocking path; the reason
-// shows up in the transcript.
+// shows up in the transcript. A hint goes to stdout as `additionalContext` WITHOUT a
+// permissionDecision, so the call stays in the normal permission flow and the model reads the
+// reason next to the tool result.
 
-import { openSync, readSync, closeSync, appendFileSync } from 'node:fs';
+import { openSync, readSync, closeSync, appendFileSync, writeSync } from 'node:fs';
 import { checkBefore, checkBom, MODE } from './lib/rules.mjs';
 
 const OFF = process.env.GUARD_OFF === '1';
@@ -36,6 +38,9 @@ function firstBytes(path, n = 3) {
 // In `audit` mode the call continues and the violation is logged. That is shadow operation:
 // first measure how often a pattern rule fires and whether it is right, then harden it.
 // A pattern that is switched to blocking immediately is a bet on one's own completeness.
+// `hint` is audit plus a message to the agent. Neither mode ends the hook: an earlier version
+// exited right after logging, so any rule checked later in the same call was skipped.
+const hints = [];
 function handle(v) {
   if (AUDIT_LOG) {
     try {
@@ -48,8 +53,8 @@ function handle(v) {
     process.stderr.write(`GUARD (${v.rule}): ${v.reason}\n`);
     process.exit(2);
   }
-  // audit: let it through. The note is in the audit log, not in the way.
-  process.exit(0);
+  // audit and hint: let it through. The hint is printed once all rules are checked.
+  if (v.mode === 'hint') hints.push(`GUARD-HINT (${v.rule}): ${v.reason}`);
 }
 
 try {
@@ -69,6 +74,15 @@ try {
   if (name === 'PreToolUse') {
     const v = checkBefore(tool, input);
     if (v) handle(v);
+    // No rule blocked: pass the collected hints to the model.
+    // Synchronous write: process.stdout to a pipe can be asynchronous, and process.exit right after
+    // it could cut the JSON short.
+    if (hints.length) {
+      writeSync(1, JSON.stringify({
+        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: hints.join('\n') },
+      }));
+      process.exit(0);
+    }
   } else if (name === 'PostToolUse' && (tool === 'Write' || tool === 'Edit')) {
     const path = input.file_path;
     if (typeof path === 'string') {
